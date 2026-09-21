@@ -29,4 +29,4 @@ public class MeController {
                 "scopes", scp != null ? List.of(scp.split(" ")) : List.of(),
                 "expiresAt", jwt.getExpiresAt().toString());
     }
-}
+}

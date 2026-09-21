@@ -16,24 +16,24 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestClient;
 
 /**
- * Catálogo de prestaciones. Cualquier rol puede consultarlo;
- * solo el Admin puede crear o modificar precios y cupos.
+ * Boxes clínicos. Es información operativa: la consulta el personal
+ * del centro, no los pacientes. Solo el Admin los administra.
  */
 @RestController
-@RequestMapping("/api/catalog/services")
-public class CatalogController {
+@RequestMapping("/api/catalog/boxes")
+public class BoxesController {
 
-    private static final String BASE = "/api/catalog/services";
+    private static final String BASE = "/api/catalog/boxes";
 
     private final RestClient client;
 
-    public CatalogController(@Qualifier("catalogClient") RestClient client) {
+    public BoxesController(@Qualifier("catalogClient") RestClient client) {
         this.client = client;
     }
 
     @GetMapping
     @PreAuthorize("hasAuthority('SCOPE_Catalog.Read') "
-            + "and hasAnyRole('Admin', 'Recepcionista', 'Auditor', 'Paciente')")
+            + "and hasAnyRole('Admin', 'Recepcionista', 'Auditor')")
     public ResponseEntity<Object> listar() {
         ResponseEntity<Object> respuesta = client.get()
                 .uri(BASE)
@@ -43,7 +43,6 @@ public class CatalogController {
         return ResponseEntity.status(respuesta.getStatusCode()).body(respuesta.getBody());
     }
 
-    /** Exige rol Y scope: defensa en profundidad. */
     @PostMapping
     @PreAuthorize("hasAuthority('SCOPE_Catalog.Write') and hasRole('Admin')")
     public ResponseEntity<Object> crear(@RequestBody Map<String, Object> body) {

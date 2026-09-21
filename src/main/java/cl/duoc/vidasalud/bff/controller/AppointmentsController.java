@@ -1,18 +1,41 @@
 package cl.duoc.vidasalud.bff.controller;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestClient;
 
-import java.util.List;
-import java.util.Map;
+import cl.duoc.vidasalud.bff.security.TokenClaims;
 
+/**
+ * Atenciones. Cada endpoint exige un scope (qué puede hacer la aplicación)
+ * y un rol (quién es el usuario), como pide el caso.
+ */
 @RestController
 @RequestMapping("/api/appointments")
 public class AppointmentsController {
+
+    private static final String BASE = "/api/appointments";
+    private static final ParameterizedTypeReference<Map<String, Object>> MAPA =
+            new ParameterizedTypeReference<>() {
+            };
 
     private final RestClient client;
 
@@ -20,47 +43,99 @@ public class AppointmentsController {
         this.client = client;
     }
 
-    /** Admin, Recepcionista y Auditor ven todo. El Paciente solo lo suyo. */
+    /** Admin, Recepcionista y Auditor ven todas. El Paciente solo las suyas. */
     @GetMapping
-    @PreAuthorize("hasAuthority('SCOPE_Appointments.Read')")
-    public List<Map<String, Object>> listar(@AuthenticationPrincipal Jwt jwt) {
-        List<String> roles = jwt.getClaimAsStringList("roles");
+    @PreAuthorize("hasAuthority('SCOPE_Appointments.Read') "
+            + "and hasAnyRole('Admin', 'Recepcionista', 'Auditor', 'Paciente')")
+    public ResponseEntity<Object> listar(@AuthenticationPrincipal Jwt jwt,
+                                         @RequestParam(required = false) String status,
+                                         @RequestParam(required = false) String from,
+                                         @RequestParam(required = false) String to) {
+        String pacienteEmail = TokenClaims.esSoloPaciente(jwt) ? TokenClaims.email(jwt) : null;
 
-        boolean soloPaciente = roles != null
-                && roles.contains("Paciente")
-                && !roles.contains("Admin")
-                && !roles.contains("Recepcionista")
-                && !roles.contains("Auditor");
+        ResponseEntity<Object> respuesta = client.get()
+                .uri(builder -> builder.path(BASE)
+                        .queryParamIfPresent("status", Optional.ofNullable(status))
+                        .queryParamIfPresent("from", Optional.ofNullable(from))
+                        .queryParamIfPresent("to", Optional.ofNullable(to))
+                        .queryParamIfPresent("pacienteEmail", Optional.ofNullable(pacienteEmail))
+                        .build())
+                .retrieve()
+                .toEntity(Object.class);
 
-        String uri = soloPaciente
-                ? "/atenciones?paciente=" + jwt.getClaimAsString("preferred_username")
-                : "/atenciones";
-
-        return client.get().uri(uri).retrieve().body(List.class);
+        return reenviar(respuesta);
     }
 
-    @PostMapping
-    @PreAuthorize("hasAnyRole('Paciente', 'Recepcionista', 'Admin')")
-    public Map<String, Object> crear(@AuthenticationPrincipal Jwt jwt,
-                                     @RequestBody Map<String, Object> atencion) {
-        // El email sale del token, no del body: nadie agenda a nombre de otro
-        atencion.put("pacienteEmail", jwt.getClaimAsString("preferred_username"));
+    /** Un Paciente solo puede consultar una atención que sea suya. */
+    @GetMapping("/{id}")
+    @PreAuthorize("hasAuthority('SCOPE_Appointments.Read') "
+            + "and hasAnyRole('Admin', 'Recepcionista', 'Auditor', 'Paciente')")
+    public ResponseEntity<Object> buscarPorId(@AuthenticationPrincipal Jwt jwt,
+                                              @PathVariable Long id) {
+        ResponseEntity<Map<String, Object>> respuesta = client.get()
+                .uri(BASE + "/{id}", id)
+                .retrieve()
+                .toEntity(MAPA);
 
-        return client.post()
-                .uri("/atenciones")
+        Map<String, Object> atencion = respuesta.getBody();
+
+        if (TokenClaims.esSoloPaciente(jwt) && atencion != null) {
+            String duenio = String.valueOf(atencion.get("pacienteEmail"));
+            if (!duenio.equalsIgnoreCase(TokenClaims.email(jwt))) {
+                throw new AccessDeniedException("La atención pertenece a otro paciente");
+            }
+        }
+
+        return ResponseEntity.status(respuesta.getStatusCode()).body(atencion);
+    }
+
+    /**
+     * El Paciente agenda para sí mismo: su email sale del token, no del body,
+     * así nadie puede agendar a nombre de otro. El personal del centro
+     * agenda para un paciente indicando su email en el body.
+     */
+    @PostMapping
+    @PreAuthorize("hasAuthority('SCOPE_Appointments.Write') "
+            + "and hasAnyRole('Admin', 'Recepcionista', 'Paciente')")
+    public ResponseEntity<Object> crear(@AuthenticationPrincipal Jwt jwt,
+                                        @RequestBody Map<String, Object> body) {
+        Map<String, Object> atencion = new HashMap<>(body);
+
+        if (TokenClaims.esSoloPaciente(jwt)) {
+            atencion.put("pacienteEmail", TokenClaims.email(jwt));
+        }
+
+        ResponseEntity<Object> respuesta = client.post()
+                .uri(BASE)
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(atencion)
                 .retrieve()
-                .body(Map.class);
+                .toEntity(Object.class);
+
+        return reenviar(respuesta);
     }
 
-    @PatchMapping("/{id}/estado")
-    @PreAuthorize("hasAnyRole('Recepcionista', 'Admin')")
-    public Map<String, Object> cambiarEstado(@PathVariable Long id,
-                                             @RequestBody Map<String, String> body) {
-        return client.patch()
-                .uri("/atenciones/{id}/estado", id)
+    /** Solo el personal del centro mueve una atención por sus estados. */
+    @PutMapping("/{id}/status")
+    @PreAuthorize("hasAuthority('SCOPE_Appointments.Write') "
+            + "and hasAnyRole('Admin', 'Recepcionista')")
+    public ResponseEntity<Object> cambiarEstado(@PathVariable Long id,
+                                                @RequestBody Map<String, Object> body) {
+        ResponseEntity<Object> respuesta = client.put()
+                .uri(BASE + "/{id}/status", id)
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(body)
                 .retrieve()
-                .body(Map.class);
+                .toEntity(Object.class);
+
+        return reenviar(respuesta);
+    }
+
+    /**
+     * Devuelve el código y el cuerpo del microservicio, sin copiar sus
+     * cabeceras (Content-Length y similares no aplican a la nueva respuesta).
+     */
+    private ResponseEntity<Object> reenviar(ResponseEntity<Object> respuesta) {
+        return ResponseEntity.status(respuesta.getStatusCode()).body(respuesta.getBody());
     }
 }
