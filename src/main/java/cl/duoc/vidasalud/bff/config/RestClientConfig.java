@@ -17,4 +17,9 @@ public class RestClientConfig {
     RestClient catalogClient(@Value("${services.catalog.url}") String baseUrl) {
         return RestClient.builder().baseUrl(baseUrl).build();
     }
-}
+
+    @Bean("analyticsClient")
+    RestClient analyticsClient(@Value("${services.analytics.url}") String baseUrl) {
+        return RestClient.builder().baseUrl(baseUrl).build();
+    }
+}
